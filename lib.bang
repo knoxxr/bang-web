@@ -1,0 +1,111 @@
+// bang-web — bang으로 작성한 최소 웹 프레임워크
+//
+// bang 코어의 TCP 프리미티브(tcp_listen/accept/read_until/write/close)와
+// 정규식·JSON 위에 라우팅·요청파싱·응답빌더를 얹는다.
+// 연결마다 spawn → 투명 동시성으로 동시 처리.
+//
+// 사용:
+//   let app = new_app()
+//   app.get("/", fn(req) { return text("hello") })
+//   app.get("/users/list", fn(req) { return json({"users": []}) })
+//   serve(app, "127.0.0.1:8080")
+
+// ── 앱 / 라우터 (클로저로 라우트 테이블 캡슐화) ──────────────────────────────
+
+fn new_app() {
+    let routes = {}
+    let register = fn(method, path, handler) {
+        routes[method + " " + path] = handler
+    }
+    return {
+        "get":  fn(path, h) { register("GET", path, h) },
+        "post": fn(path, h) { register("POST", path, h) },
+        "put":  fn(path, h) { register("PUT", path, h) },
+        "delete": fn(path, h) { register("DELETE", path, h) },
+        "lookup": fn(method, path) { return get(routes, method + " " + path, nil) }
+    }
+}
+
+// ── 응답 헬퍼 (핸들러가 반환하는 응답 객체) ─────────────────────────────────
+
+fn text(body) {
+    return {"status": 200, "content_type": "text/plain; charset=utf-8", "body": body}
+}
+
+fn json(value) {
+    return {"status": 200, "content_type": "application/json", "body": json_stringify(value)}
+}
+
+fn status(code, body) {
+    return {"status": code, "content_type": "text/plain; charset=utf-8", "body": body}
+}
+
+// ── 요청 파싱 ───────────────────────────────────────────────────────────────
+
+fn parse_request(raw) {
+    // 첫 줄: METHOD PATH HTTP/x.y
+    let g = regex_groups(raw, "^(\\w+) (\\S+)")
+    if g == nil {
+        return {"method": "GET", "path": "/", "raw": raw}
+    }
+    let path = g[2]
+    // 쿼리스트링 분리
+    let query = ""
+    let qpos = find(path, "?")
+    if qpos >= 0 {
+        query = slice(path, qpos + 1, len(path))
+        path = slice(path, 0, qpos)
+    }
+    return {"method": g[1], "path": path, "query": query, "raw": raw}
+}
+
+// ── HTTP 응답 직렬화 ────────────────────────────────────────────────────────
+
+fn status_text(code) {
+    if code == 200 { return "OK" }
+    if code == 201 { return "Created" }
+    if code == 400 { return "Bad Request" }
+    if code == 404 { return "Not Found" }
+    if code == 500 { return "Internal Server Error" }
+    return "OK"
+}
+
+fn render(resp) {
+    let body = resp.body
+    return "HTTP/1.1 " + str(resp.status) + " " + status_text(resp.status) + "\r\n" +
+        "Content-Type: " + resp.content_type + "\r\n" +
+        "Content-Length: " + str(len(body)) + "\r\n" +
+        "Connection: close\r\n" +
+        "\r\n" +
+        body
+}
+
+// ── 연결 처리 + 서버 루프 ───────────────────────────────────────────────────
+
+fn handle_conn(app, conn) {
+    tcp_set_timeout(conn, 10000)
+    let raw = tcp_read_until(conn, "\r\n\r\n")
+    let req = parse_request(raw)
+    let handler = app.lookup(req.method, req.path)
+    let resp = nil
+    if handler == nil {
+        resp = status(404, "Not Found: " + req.method + " " + req.path)
+    } else {
+        try {
+            resp = handler(req)
+        } catch e {
+            resp = status(500, "Internal Server Error")
+        }
+    }
+    tcp_write(conn, render(resp))
+    tcp_close(conn)
+}
+
+fn serve(app, addr) {
+    let server = tcp_listen(addr)
+    print("bang-web: listening on http://" + addr)
+    while true {
+        let conn = tcp_accept(server)
+        spawn handle_conn(app, conn)    // 연결마다 동시 처리
+    }
+}

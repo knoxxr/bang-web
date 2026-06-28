@@ -1,0 +1,30 @@
+// bang-web 데모 앱
+//
+// 실행 (개발 중, BANG_PATH로 lib.bang 위치 지정):
+//   BANG_PATH=.. bang examples/app.bang
+// 테스트:
+//   curl http://127.0.0.1:8080/
+//   curl http://127.0.0.1:8080/hello
+//   curl http://127.0.0.1:8080/api/info
+
+let web = import("lib")
+
+let app = web.new_app()
+
+app.get("/", fn(req) {
+    return web.text("welcome to bang-web")
+})
+
+app.get("/hello", fn(req) {
+    return web.text("hello! query=" + req.query)
+})
+
+app.get("/api/info", fn(req) {
+    return web.json({
+        "framework": "bang-web",
+        "path": req.path,
+        "method": req.method
+    })
+})
+
+web.serve(app, "127.0.0.1:8080")

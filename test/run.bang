@@ -1,0 +1,38 @@
+// bang-web 자체 테스트 (서버 없이 순수 로직 검증)
+// 실행:  bang test/run.bang   (bang-web 루트에서)
+
+let web = import("lib")
+
+// 요청 파싱
+let r = web.parse_request("GET /hello?x=1&y=2 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+assert(r.method == "GET", "method")
+assert(r.path == "/hello", "path (쿼리 분리)")
+assert(r.query == "x=1&y=2", "query")
+
+let r2 = web.parse_request("POST /api/users HTTP/1.1\r\n\r\n")
+assert(r2.method == "POST", "POST method")
+assert(r2.path == "/api/users", "path no query")
+
+// 라우팅
+let app = web.new_app()
+app.get("/", fn(req) { return web.text("home") })
+app.post("/users", fn(req) { return web.json({"ok": true}) })
+assert(app.lookup("GET", "/") != nil, "GET / 등록됨")
+assert(app.lookup("POST", "/users") != nil, "POST /users 등록됨")
+assert(app.lookup("GET", "/users") == nil, "메서드 불일치는 미등록")
+assert(app.lookup("GET", "/missing") == nil, "없는 경로")
+
+// 응답 렌더링
+let out = web.render(web.text("hi"))
+assert(contains(out, "HTTP/1.1 200 OK"), "상태줄")
+assert(contains(out, "Content-Length: 2"), "본문 길이")
+assert(contains(out, "hi"), "본문")
+
+let j = web.render(web.json({"a": 1}))
+assert(contains(j, "application/json"), "json content-type")
+assert(contains(j, "{\"a\":1}"), "json 본문")
+
+let nf = web.render(web.status(404, "nope"))
+assert(contains(nf, "404 Not Found"), "404 상태")
+
+print("bang-web: 모든 테스트 통과")
