@@ -75,14 +75,19 @@
 
 → e2e 검증: html Content-Type, `302 Found` + `Location`, `Set-Cookie`(속성 포함), 다중 `Set-Cookie` 확인.
 
-### Phase 5 — 연결/성능
+### Phase 5 — 연결/성능 — ✅ keep-alive 완료
 
-- **keep-alive**: `Connection: keep-alive` 시 같은 conn에서 다음 요청 루프. 타임아웃·요청 수 상한.
-- (장기) bang 코어에 논블로킹 I/O 도입 시 C10K — 코어 의존.
+- ✅ **keep-alive**: `handle_conn` 이 한 연결에서 요청을 순차 루프 처리. 버전·`Connection` 헤더로 유지 판단(`keep_alive`): HTTP/1.1 기본 유지(`close` 면 종료), HTTP/1.0 기본 종료(`keep-alive` 면 유지). `render` 가 `resp.keep_alive` 에 따라 `Connection: keep-alive|close` 출력.
+- ✅ **상한·타임아웃**: 연결당 최대 100요청, idle 시 read 타임아웃(10s)으로 종료(read 를 try/catch 로 감싸 정리). 파이프라이닝은 미지원(요청-응답 순차).
+- ⬜ (장기) bang 코어에 논블로킹 I/O 도입 시 C10K — 코어 의존.
 
-### Phase 6 — 마감
+→ e2e 검증: 한 TCP 연결에서 2요청 재사용("Re-using existing connection"), `Connection: keep-alive` 헤더, `Connection: close` 요청 시 종료 확인.
 
-- 문서화(README API 표 갱신), 예제 확장(폼/파라미터/미들웨어 데모), 버전 0.2 태깅.
+### Phase 6 — 마감 — ✅ 완료
+
+- ✅ 문서화: README 전면 개편(API 표 — 앱/서버·응답빌더·미들웨어, req/resp 객체, keep-alive).
+- ✅ 예제 확장: `examples/app.bang` 에 폼·파라미터·와일드카드·미들웨어·html·redirect·쿠키 데모.
+- ✅ 버전 태깅: v0.3 (Phase 1–5).
 
 ## 테스트 전략
 
@@ -90,5 +95,6 @@
 
 ## 마일스톤
 
-- **v0.2**: Phase 1–4 (헤더·바디·파라미터·미들웨어·응답빌더)
-- **v0.3**: Phase 5 (keep-alive) + 코어 논블로킹 대응 준비
+- ✅ **v0.2**: Phase 1–4 (헤더·바디·파라미터·미들웨어·응답빌더) — 머지 완료
+- ✅ **v0.3**: Phase 5 (keep-alive) + Phase 6 (문서·태깅)
+- **이후**: 정적 파일 서빙, 코어 논블로킹 I/O 도입 시 C10K
