@@ -209,4 +209,30 @@ let corsmw = web.cors("*")
 let cresp = corsmw("req", fn() { return web.text("ok") })
 assert(cresp.headers["Access-Control-Allow-Origin"] == "*", "cors 헤더 주입")
 
+// ── Phase 5: keep-alive 판단 + Connection 헤더 ──
+// 버전 파싱
+assert(web.parse_request("GET / HTTP/1.1\r\n\r\n").version == "1.1", "HTTP 버전 1.1 파싱")
+assert(web.parse_request("GET / HTTP/1.0\r\n\r\n").version == "1.0", "HTTP 버전 1.0 파싱")
+
+// HTTP/1.1: 기본 유지, close 면 종료
+let k11 = web.parse_request("GET / HTTP/1.1\r\n\r\n")
+assert(web.keep_alive(k11, 1, 100) == true, "1.1 기본 keep-alive")
+let k11c = web.parse_request("GET / HTTP/1.1\r\nConnection: close\r\n\r\n")
+assert(web.keep_alive(k11c, 1, 100) == false, "1.1 + close → 종료")
+
+// HTTP/1.0: 기본 종료, keep-alive 면 유지
+let k10 = web.parse_request("GET / HTTP/1.0\r\n\r\n")
+assert(web.keep_alive(k10, 1, 100) == false, "1.0 기본 종료")
+let k10k = web.parse_request("GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n")
+assert(web.keep_alive(k10k, 1, 100) == true, "1.0 + keep-alive → 유지")
+
+// 요청 수 상한 도달 시 종료
+assert(web.keep_alive(k11, 100, 100) == false, "상한 도달 → 종료")
+
+// render Connection 헤더
+let rk = web.text("x")
+rk.keep_alive = true
+assert(contains(web.render(rk), "Connection: keep-alive"), "keep_alive=true → keep-alive 헤더")
+assert(contains(web.render(web.text("x")), "Connection: close"), "기본 → close 헤더")
+
 print("bang-web: 모든 테스트 통과")
