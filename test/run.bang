@@ -135,6 +135,13 @@ let j = web.render(web.json({"a": 1}))
 assert(contains(j, "application/json"), "json content-type")
 assert(contains(j, "{\"a\":1}"), "json 본문")
 
+// UTF-8 바이트 길이 (Content-Length 는 문자 수가 아니라 바이트 수)
+assert(web.byte_len("hi") == 2, "ASCII 바이트 길이")
+assert(web.byte_len("가") == 3, "한글 1글자 = 3바이트")
+assert(web.byte_len("a가") == 4, "혼합 = 1+3")
+let kr = web.render(web.text("가나"))           // 6바이트
+assert(contains(kr, "Content-Length: 6"), "멀티바이트 본문 Content-Length(바이트)")
+
 let nf = web.render(web.status(404, "nope"))
 assert(contains(nf, "404 Not Found"), "404 상태")
 
