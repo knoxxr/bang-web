@@ -10,20 +10,108 @@
 //   app.get("/users/list", fn(req) { return json({"users": []}) })
 //   serve(app, "127.0.0.1:8080")
 
+// ── 라우트 패턴 매칭 (순수 로직, 서버 없이 테스트 가능) ──────────────────────
+
+// 경로를 세그먼트 배열로 분해한다. 빈 조각(맨 앞/중복 슬래시)은 버린다.
+//   "/"            → []
+//   "/users/:id"   → ["users", ":id"]
+//   "/static/*p"   → ["static", "*p"]
+fn route_segments(path) {
+    let parts = split(path, "/")
+    let segs = []
+    let i = 0
+    while i < len(parts) {
+        if parts[i] != "" { segs = push(segs, parts[i]) }
+        i = i + 1
+    }
+    return segs
+}
+
+// 패턴 세그먼트(pat)와 요청 경로 세그먼트(path_segs)를 매칭한다.
+// 매칭되면 캡처한 파라미터 맵(없으면 빈 맵), 안 되면 nil.
+//   ":name"  → 한 세그먼트 캡처
+//   "*name"  → 남은 경로 전체를 "/"로 이어 캡처(반드시 마지막 세그먼트)
+fn match_segments(pat, path_segs) {
+    let params = {}
+    let i = 0
+    while i < len(pat) {
+        let p = pat[i]
+        let kind = slice(p, 0, 1)
+        if kind == "*" {
+            params[slice(p, 1, len(p))] = join(slice(path_segs, i, len(path_segs)), "/")
+            return params
+        }
+        if i >= len(path_segs) { return nil }       // 패턴이 경로보다 김
+        if kind == ":" {
+            params[slice(p, 1, len(p))] = path_segs[i]
+        } else {
+            if p != path_segs[i] { return nil }      // 리터럴 불일치
+        }
+        i = i + 1
+    }
+    if len(path_segs) != len(pat) { return nil }     // 경로가 패턴보다 김(와일드카드 없음)
+    return params
+}
+
 // ── 앱 / 라우터 (클로저로 라우트 테이블 캡슐화) ──────────────────────────────
 
 fn new_app() {
-    let routes = {}
+    // state 맵에 라우트/미들웨어 배열을 담아 클로저들이 in-place 공유한다.
+    let state = {"routes": [], "middlewares": []}
     let register = fn(method, path, handler) {
-        routes[method + " " + path] = handler
+        state.routes = push(state.routes, {
+            "method": method, "segs": route_segments(path), "handler": handler
+        })
+    }
+    // 매칭 결과: {matched, handler, params, allow}
+    //  - matched true  → handler 호출 (params 포함)
+    //  - matched false, allow != "" → 405 (경로는 있으나 메서드 불일치)
+    //  - matched false, allow == "" → 404
+    let find_route = fn(method, path) {
+        let segs = route_segments(path)
+        let allow = ""
+        let i = 0
+        while i < len(state.routes) {
+            let e = state.routes[i]
+            i = i + 1
+            let params = match_segments(e.segs, segs)
+            if params == nil { continue }
+            if e.method == method {
+                return {"matched": true, "handler": e.handler, "params": params, "allow": ""}
+            }
+            if find(allow, e.method) < 0 {
+                if allow == "" { allow = e.method } else { allow = allow + ", " + e.method }
+            }
+        }
+        return {"matched": false, "handler": nil, "params": {}, "allow": allow}
     }
     return {
         "get":  fn(path, h) { register("GET", path, h) },
         "post": fn(path, h) { register("POST", path, h) },
         "put":  fn(path, h) { register("PUT", path, h) },
         "delete": fn(path, h) { register("DELETE", path, h) },
-        "lookup": fn(method, path) { return get(routes, method + " " + path, nil) }
+        "route": find_route,
+        // 미들웨어 등록: fn(req, next) -> resp. 등록 순서대로 양파처럼 감싼다.
+        "use": fn(mw) { state.middlewares = push(state.middlewares, mw) },
+        "middlewares": fn() { return state.middlewares },
+        // 하위 호환: 핸들러만 반환(매칭 실패 시 nil). 파라미터는 route() 사용.
+        "lookup": fn(method, path) {
+            let m = find_route(method, path)
+            if m.matched { return m.handler }
+            return nil
+        }
     }
+}
+
+// 미들웨어 체인을 재귀로 실행한다(Koa식 양파 모델).
+//  - mws[i](req, next) 형태. next() 호출 시 다음 단계(mws[i+1] … 최종 dispatch)로 진행.
+//  - 루프로 클로저를 엮으면 bang 의 반복-캡처 특성상 깨지므로 재귀로 푼다(파라미터는 호출마다 새 프레임).
+fn run_chain(mws, i, req, dispatch) {
+    if i >= len(mws) {
+        return dispatch(req)
+    }
+    let mw = mws[i]
+    return mw(req, fn() { return run_chain(mws, i + 1, req, dispatch) })
 }
 
 // ── 응답 헬퍼 (핸들러가 반환하는 응답 객체) ─────────────────────────────────
@@ -40,23 +128,201 @@ fn status(code, body) {
     return {"status": code, "content_type": "text/plain; charset=utf-8", "body": body}
 }
 
+fn html(body) {
+    return {"status": 200, "content_type": "text/html; charset=utf-8", "body": body}
+}
+
+// 리다이렉트(code: 301/302/303/307 등). Location 헤더 + 빈 본문.
+fn redirect(url, code) {
+    return {"status": code, "content_type": "text/plain; charset=utf-8", "body": "",
+            "headers": {"Location": url}}
+}
+
+fn not_found(body) {
+    return status(404, body)
+}
+
+// 응답에 헤더를 추가한다(resp.headers 맵). render 가 이를 출력한다.
+fn with_header(resp, name, value) {
+    let h = get(resp, "headers", {})
+    h[name] = value
+    resp.headers = h
+    return resp
+}
+
+// Set-Cookie 추가. 같은 응답에 여러 번 호출하면 여러 쿠키가 누적된다(resp.cookies 배열).
+// attrs: 쿠키 속성 문자열(예: "Path=/; HttpOnly; Max-Age=3600"), 없으면 "".
+fn set_cookie(resp, name, value, attrs) {
+    let cookies = get(resp, "cookies", [])
+    let c = name + "=" + value
+    if attrs != "" { c = c + "; " + attrs }
+    resp.cookies = push(cookies, c)
+    return resp
+}
+
+// ── 기본 제공 미들웨어 (팩토리: 미들웨어 함수를 반환) ────────────────────────
+
+// 요청 1줄 로깅: "METHOD path -> status". app.use(logger())
+fn logger() {
+    return fn(req, next) {
+        let resp = next()
+        print(req.method + " " + req.path + " -> " + str(resp.status))
+        return resp
+    }
+}
+
+// CORS 허용 오리진 헤더 추가. app.use(cors("*"))
+fn cors(origin) {
+    return fn(req, next) {
+        return with_header(next(), "Access-Control-Allow-Origin", origin)
+    }
+}
+
 // ── 요청 파싱 ───────────────────────────────────────────────────────────────
 
+// 16진수 한 자리 → 값(0~15), 아니면 -1.
+fn hex_val(c) {
+    let o = ord(c)
+    if o >= 48 and o <= 57 { return o - 48 }     // 0-9
+    if o >= 97 and o <= 102 { return o - 87 }    // a-f
+    if o >= 65 and o <= 70 { return o - 55 }     // A-F
+    return -1
+}
+
+// 퍼센트 인코딩 디코드("+"→공백, "%XX"→문자). ASCII 범위 기준.
+fn url_decode(s) {
+    let out = ""
+    let i = 0
+    let n = len(s)
+    while i < n {
+        let c = slice(s, i, i + 1)
+        if c == "+" {
+            out = out + " "
+            i = i + 1
+            continue
+        }
+        if c == "%" and i + 2 < n {
+            let hi = hex_val(slice(s, i + 1, i + 2))
+            let lo = hex_val(slice(s, i + 2, i + 3))
+            if hi >= 0 and lo >= 0 {
+                out = out + chr(hi * 16 + lo)
+                i = i + 3
+                continue
+            }
+        }
+        out = out + c
+        i = i + 1
+    }
+    return out
+}
+
+// "k=v&k2=v2" → 맵 (키/값 모두 url_decode). 빈 문자열은 빈 맵.
+fn parse_query(qs) {
+    let params = {}
+    if qs == "" { return params }
+    let pairs = split(qs, "&")
+    let i = 0
+    while i < len(pairs) {
+        let pair = pairs[i]
+        i = i + 1
+        if pair == "" { continue }
+        let eq = find(pair, "=")
+        if eq < 0 {
+            params[url_decode(pair)] = ""
+            continue
+        }
+        params[url_decode(slice(pair, 0, eq))] = url_decode(slice(pair, eq + 1, len(pair)))
+    }
+    return params
+}
+
+// application/x-www-form-urlencoded 바디 파싱 (쿼리스트링과 동일 포맷).
+fn parse_form(body) {
+    return parse_query(body)
+}
+
+// 헤더 블록(요청줄 제외, CRLF로 구분된 "Name: value" 줄들)을 소문자 키 맵으로.
+fn parse_headers(block) {
+    let headers = {}
+    let lines = split(block, "\r\n")
+    let i = 0
+    while i < len(lines) {
+        let line = lines[i]
+        i = i + 1
+        if line == "" { continue }
+        let cpos = find(line, ":")
+        if cpos < 0 { continue }
+        let name = lower(trim(slice(line, 0, cpos)))
+        let value = trim(slice(line, cpos + 1, len(line)))
+        headers[name] = value
+    }
+    return headers
+}
+
+// 바디를 파싱해 데이터 필드(req.form / req.json)로 노출한다.
+//
+// 핵심: bang 0.23 타입체커는 핸들러 클로저 안에서 parse_form/json_parse 같은
+// "컬렉션 반환 함수"를 호출하면 무한루프한다(ROADMAP의 알려진 버그). 하지만
+// req.query_params 처럼 lib 가 "미리 계산해 둔 데이터 필드"를 핸들러가 읽는 건 안전하다.
+// 그래서 바디 파싱을 핸들러가 아니라 여기(일반 함수)에서 미리 수행해 필드로 노출한다.
+// 바디가 완성된 뒤 호출해야 하므로 handle_conn 이 완성 루프 직후 다시 호출한다.
+fn finalize_body(req) {
+    req.form = parse_form(req.body)                     // urlencoded 바디 → 맵
+    req.json = nil                                      // JSON 이 아니면 nil
+    let ct = get(req.headers, "content-type", "")
+    if contains(ct, "application/json") {
+        try {
+            req.json = json_parse(req.body)
+        } catch e {
+            req.json = nil                              // 깨진 JSON 은 nil
+        }
+    }
+    return req
+}
+
 fn parse_request(raw) {
+    let method = "GET"
+    let path = "/"
+    let query = ""
+    let headers = {}
+    let body = ""
+
     // 첫 줄: METHOD PATH HTTP/x.y
     let g = regex_groups(raw, "^(\\w+) (\\S+)")
-    if g == nil {
-        return {"method": "GET", "path": "/", "raw": raw}
+    if g != nil {
+        method = g[1]
+        path = g[2]
+        // 쿼리스트링 분리
+        let qpos = find(path, "?")
+        if qpos >= 0 {
+            query = slice(path, qpos + 1, len(path))
+            path = slice(path, 0, qpos)
+        }
+        // 헤더/바디 분리: 첫 빈 줄("\r\n\r\n") 기준.
+        // tcp_read_until 이 청크 단위로 읽으므로 바디 일부가 raw 에 이미 섞여 있을 수 있다.
+        let sep = find(raw, "\r\n\r\n")
+        if sep >= 0 {
+            let head = slice(raw, 0, sep)              // 요청줄 + 헤더들
+            let firstnl = find(head, "\r\n")
+            if firstnl >= 0 {
+                headers = parse_headers(slice(head, firstnl + 2, len(head)))
+            }
+            body = slice(raw, sep + 4, len(raw))       // 첫 빈 줄 이후 = 바디(부분일 수 있음)
+        }
     }
-    let path = g[2]
-    // 쿼리스트링 분리
-    let query = ""
-    let qpos = find(path, "?")
-    if qpos >= 0 {
-        query = slice(path, qpos + 1, len(path))
-        path = slice(path, 0, qpos)
-    }
-    return {"method": g[1], "path": path, "query": query, "raw": raw}
+
+    let req = {"method": method, "path": path, "query": query,
+               "headers": headers, "body": body, "raw": raw}
+    req.query_params = parse_query(query)               // 쿼리 맵(즉시 파싱)
+    req.params = {}                                      // path 파라미터(라우팅 시 채움)
+    return finalize_body(req)
+}
+
+// 선언된 Content-Length(없으면 0).
+fn content_length(req) {
+    let v = get(req.headers, "content-length", nil)
+    if v == nil { return 0 }
+    return int(trim(v))
 }
 
 // ── HTTP 응답 직렬화 ────────────────────────────────────────────────────────
@@ -64,20 +330,43 @@ fn parse_request(raw) {
 fn status_text(code) {
     if code == 200 { return "OK" }
     if code == 201 { return "Created" }
+    if code == 301 { return "Moved Permanently" }
+    if code == 302 { return "Found" }
+    if code == 303 { return "See Other" }
+    if code == 307 { return "Temporary Redirect" }
     if code == 400 { return "Bad Request" }
     if code == 404 { return "Not Found" }
+    if code == 405 { return "Method Not Allowed" }
     if code == 500 { return "Internal Server Error" }
     return "OK"
 }
 
 fn render(resp) {
     let body = resp.body
-    return "HTTP/1.1 " + str(resp.status) + " " + status_text(resp.status) + "\r\n" +
+    let out = "HTTP/1.1 " + str(resp.status) + " " + status_text(resp.status) + "\r\n" +
         "Content-Type: " + resp.content_type + "\r\n" +
-        "Content-Length: " + str(len(body)) + "\r\n" +
-        "Connection: close\r\n" +
-        "\r\n" +
-        body
+        "Content-Length: " + str(len(body)) + "\r\n"
+    // 커스텀 헤더(resp.headers) 출력
+    let extra = get(resp, "headers", nil)
+    if extra != nil {
+        let ks = keys(extra)
+        let i = 0
+        while i < len(ks) {
+            let k = ks[i]
+            i = i + 1
+            out = out + k + ": " + extra[k] + "\r\n"
+        }
+    }
+    // 쿠키(resp.cookies): 항목마다 Set-Cookie 한 줄
+    let cks = get(resp, "cookies", nil)
+    if cks != nil {
+        let j = 0
+        while j < len(cks) {
+            out = out + "Set-Cookie: " + cks[j] + "\r\n"
+            j = j + 1
+        }
+    }
+    return out + "Connection: close\r\n\r\n" + body
 }
 
 // ── 연결 처리 + 서버 루프 ───────────────────────────────────────────────────
@@ -86,16 +375,31 @@ fn handle_conn(app, conn) {
     tcp_set_timeout(conn, 10000)
     let raw = tcp_read_until(conn, "\r\n\r\n")
     let req = parse_request(raw)
-    let handler = app.lookup(req.method, req.path)
-    let resp = nil
-    if handler == nil {
-        resp = status(404, "Not Found: " + req.method + " " + req.path)
-    } else {
-        try {
-            resp = handler(req)
-        } catch e {
-            resp = status(500, "Internal Server Error")
+    // 바디가 헤더와 같은 청크에 일부만 실려 왔을 수 있다 → Content-Length 만큼 마저 읽는다.
+    let need = content_length(req)
+    while len(req.body) < need {
+        let chunk = tcp_read(conn)
+        if chunk == "" { break }    // EOF
+        req.body = req.body + chunk
+    }
+    finalize_body(req)              // 완성된 바디로 req.form / req.json 갱신
+    // 라우팅 + 핸들러 = 체인의 최종 단계(dispatch). 미들웨어가 이를 감싼다.
+    let dispatch = fn(req) {
+        let m = app.route(req.method, req.path)
+        if m.matched {
+            req.params = m.params   // path 파라미터 주입
+            return m.handler(req)
         }
+        if m.allow != "" {
+            return with_header(status(405, "Method Not Allowed"), "Allow", m.allow)
+        }
+        return status(404, "Not Found: " + req.method + " " + req.path)
+    }
+    let resp = nil
+    try {
+        resp = run_chain(app.middlewares(), 0, req, dispatch)
+    } catch e {
+        resp = status(500, "Internal Server Error")
     }
     tcp_write(conn, render(resp))
     tcp_close(conn)

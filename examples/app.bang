@@ -11,6 +11,10 @@ let web = import("lib")
 
 let app = web.new_app()
 
+// 미들웨어 (등록 순서대로 양파처럼 감싼다):
+app.use(web.logger())        // 요청 1줄 로깅: "GET / -> 200"
+app.use(web.cors("*"))       // 모든 응답에 CORS 허용 헤더
+
 app.get("/", fn(req) {
     return web.text("welcome to bang-web")
 })
@@ -25,6 +29,47 @@ app.get("/api/info", fn(req) {
         "path": req.path,
         "method": req.method
     })
+})
+
+// 쿼리스트링 맵 (자동 퍼센트 디코딩):
+//   curl "http://127.0.0.1:8080/search?q=hello+world"
+app.get("/search", fn(req) {
+    return web.json({"q": req.query_params["q"]})
+})
+
+// JSON 바디 (req.json 은 application/json 바디를 미리 파싱한 값):
+//   curl -X POST http://127.0.0.1:8080/api/users -H 'Content-Type: application/json' -d '{"name":"bang"}'
+app.post("/api/users", fn(req) {
+    return web.json({"created": req.json.name})
+})
+
+// 폼 바디 (req.form 은 urlencoded 바디를 미리 파싱한 맵):
+//   curl -X POST http://127.0.0.1:8080/login -d 'user=admin&pw=secret'
+app.post("/login", fn(req) {
+    return web.text("welcome, " + req.form["user"])
+})
+
+// path 파라미터 (req.params):
+//   curl http://127.0.0.1:8080/users/42   → {"id":"42"}
+app.get("/users/:id", fn(req) {
+    return web.json({"id": req.params["id"]})
+})
+
+// 와일드카드 (남은 경로 전체 캡처):
+//   curl http://127.0.0.1:8080/files/css/app.css   → {"path":"css/app.css"}
+app.get("/files/*path", fn(req) {
+    return web.json({"path": req.params["path"]})
+})
+
+// HTML 응답:
+app.get("/page", fn(req) {
+    return web.html("<h1>bang-web</h1>")
+})
+
+// 리다이렉트 + 쿠키:
+//   curl -i http://127.0.0.1:8080/signin
+app.get("/signin", fn(req) {
+    return web.set_cookie(web.redirect("/", 302), "sid", "demo", "Path=/; HttpOnly")
 })
 
 web.serve(app, "127.0.0.1:8080")
