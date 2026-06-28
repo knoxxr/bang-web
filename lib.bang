@@ -160,6 +160,82 @@ fn set_cookie(resp, name, value, attrs) {
     return resp
 }
 
+// ── HTML 빌더 (서버 렌더링용; 사용자 입력은 escape 로 XSS 방지) ──────────────
+
+// HTML 특수문자 이스케이프. & 를 먼저 치환해야 한다(이중 이스케이프 방지).
+fn escape(s) {
+    let r = replace(s, "&", "&amp;")
+    r = replace(r, "<", "&lt;")
+    r = replace(r, ">", "&gt;")
+    r = replace(r, "\"", "&quot;")
+    r = replace(r, "'", "&#39;")
+    return r
+}
+
+// 속성 맵 → ' k="escape(v)"' 문자열. nil/빈 맵이면 "".
+fn attrs_str(attrs) {
+    if attrs == nil { return "" }
+    let out = ""
+    let ks = keys(attrs)
+    let i = 0
+    while i < len(ks) {
+        let k = ks[i]
+        out = out + " " + k + "=\"" + escape(attrs[k]) + "\""
+        i = i + 1
+    }
+    return out
+}
+
+// 일반 요소. children 은 이미 만들어진 HTML 문자열 배열(또는 nil).
+//   el("div", {"class":"card"}, [txt("hi"), button("ok")])
+fn el(tag, attrs, children) {
+    let inner = ""
+    if children != nil { inner = join(children, "") }
+    return "<" + tag + attrs_str(attrs) + ">" + inner + "</" + tag + ">"
+}
+
+// void 요소(닫는 태그 없음): input, img, br 등.  void_el("input", {"name":"q"})
+fn void_el(tag, attrs) {
+    return "<" + tag + attrs_str(attrs) + ">"
+}
+
+// 이스케이프된 텍스트 노드(children 배열에 넣어 안전하게 본문 삽입).
+fn txt(s) {
+    return escape(s)
+}
+
+// 신뢰된 raw HTML 통과(이미 빌더로 만든 조각 등). 사용자 입력엔 쓰지 말 것.
+fn raw(s) {
+    return s
+}
+
+// ── 자주 쓰는 단축 헬퍼 (버튼·라벨·입력·링크·문서) ──────────────────────────
+
+fn button(label_text) {
+    return el("button", {}, [txt(label_text)])
+}
+
+fn label(text_) {
+    return el("label", {}, [txt(text_)])
+}
+
+fn input(attrs) {
+    return void_el("input", attrs)
+}
+
+fn link(href, text_) {
+    return el("a", {"href": href}, [txt(text_)])
+}
+
+// 전체 HTML 문서 골격. title 은 이스케이프, body 는 raw HTML(빌더 결과).
+fn doc(title, body) {
+    return "<!doctype html>" +
+        el("html", nil, [
+            el("head", nil, [raw("<meta charset=\"utf-8\">"), el("title", nil, [txt(title)])]),
+            el("body", nil, [raw(body)])
+        ])
+}
+
 // ── 기본 제공 미들웨어 (팩토리: 미들웨어 함수를 반환) ────────────────────────
 
 // 요청 1줄 로깅: "METHOD path -> status". app.use(logger())
@@ -341,6 +417,24 @@ fn content_length(req) {
 
 // ── HTTP 응답 직렬화 ────────────────────────────────────────────────────────
 
+// 문자열의 UTF-8 바이트 길이. bang 의 len()은 문자 수라서, Content-Length(바이트)에는
+// 코드포인트별 바이트 수를 합산해야 한다(한글 등 멀티바이트 본문 잘림 방지).
+fn byte_len(s) {
+    let n = 0
+    let i = 0
+    let count = len(s)
+    while i < count {
+        let cp = ord(slice(s, i, i + 1))
+        let add = 4
+        if cp < 128 { add = 1 }
+        if cp >= 128 and cp < 2048 { add = 2 }
+        if cp >= 2048 and cp < 65536 { add = 3 }
+        n = n + add
+        i = i + 1
+    }
+    return n
+}
+
 fn status_text(code) {
     if code == 200 { return "OK" }
     if code == 201 { return "Created" }
@@ -359,7 +453,7 @@ fn render(resp) {
     let body = resp.body
     let out = "HTTP/1.1 " + str(resp.status) + " " + status_text(resp.status) + "\r\n" +
         "Content-Type: " + resp.content_type + "\r\n" +
-        "Content-Length: " + str(len(body)) + "\r\n"
+        "Content-Length: " + str(byte_len(body)) + "\r\n"
     // 커스텀 헤더(resp.headers) 출력
     let extra = get(resp, "headers", nil)
     if extra != nil {
@@ -414,8 +508,9 @@ fn handle_conn(app, conn) {
         if raw == "" { break }                       // EOF/타임아웃 → 연결 종료
         let req = parse_request(raw)
         // 바디가 헤더와 같은 청크에 일부만 실려 왔을 수 있다 → Content-Length 만큼 마저 읽는다.
+        // 비교는 바이트 기준(Content-Length 는 바이트, len()은 문자 수이므로 byte_len 사용).
         let need = content_length(req)
-        while len(req.body) < need {
+        while byte_len(req.body) < need {
             let chunk = tcp_read(conn)
             if chunk == "" { break }    // EOF
             req.body = req.body + chunk
