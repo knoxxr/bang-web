@@ -1,0 +1,124 @@
+// memos — bang-web 로 만든 인메모리 메모 서비스 (예제)
+//
+// 실행:
+//   BANG_PATH=. bang examples/memos.bang
+// 브라우저:
+//   http://127.0.0.1:8080/
+// API:
+//   curl http://127.0.0.1:8080/api/memos
+//   curl -X POST http://127.0.0.1:8080/api/memos -H 'Content-Type: application/json' -d '{"text":"hello"}'
+//   curl http://127.0.0.1:8080/api/memos/1
+//   curl -X DELETE http://127.0.0.1:8080/api/memos/1
+//
+// 데모 목적의 단순 인메모리 저장소다. 동시 요청이 같은 store 를 변경하므로
+// 고부하에서는 경쟁이 있을 수 있다(데모 한정).
+
+let web = import("lib")
+
+// ── 저장소 (상태를 클로저에 캡슐화) ─────────────────────────────────────────
+fn new_store() {
+    let s = {"items": [], "next": 1}
+    return {
+        "all": fn() { return s.items },
+        "get": fn(id) {
+            let i = 0
+            while i < len(s.items) {
+                if s.items[i].id == id { return s.items[i] }
+                i = i + 1
+            }
+            return nil
+        },
+        "add": fn(text) {
+            let memo = {"id": str(s.next), "text": text}
+            s.next = s.next + 1
+            s.items = push(s.items, memo)
+            return memo
+        },
+        "remove": fn(id) {
+            let kept = []
+            let removed = false
+            let i = 0
+            while i < len(s.items) {
+                if s.items[i].id == id {
+                    removed = true
+                } else {
+                    kept = push(kept, s.items[i])
+                }
+                i = i + 1
+            }
+            s.items = kept
+            return removed
+        }
+    }
+}
+
+// ── HTML 페이지 (lib 의 HTML 빌더 사용 — 사용자 입력 자동 이스케이프) ────────
+fn page(memos) {
+    // 메모 목록 (각 항목에 삭제 폼)
+    let lis = []
+    let i = 0
+    while i < len(memos) {
+        let m = memos[i]
+        let del = web.el("form",
+            {"method": "post", "action": "/memos/" + m.id + "/delete", "style": "display:inline"},
+            [web.button("삭제")])
+        lis = push(lis, web.el("li", nil, [web.txt("#" + m.id + " " + m.text + " "), web.raw(del)]))
+        i = i + 1
+    }
+    // 추가 폼
+    let add = web.el("form", {"method": "post", "action": "/memos"}, [
+        web.input({"name": "text", "placeholder": "메모 입력"}),
+        web.raw(" "),
+        web.button("추가")
+    ])
+    let body = web.el("h1", nil, [web.txt("memos (bang-web)")]) +
+        add +
+        web.el("ul", nil, [web.raw(join(lis, ""))])
+    return web.doc("memos", body)
+}
+
+// ── 앱 구성 ─────────────────────────────────────────────────────────────────
+let store = new_store()
+store.add("bang-web 예제 메모")
+
+let app = web.new_app()
+app.use(web.logger())
+app.use(web.cors("*"))
+
+// 웹 UI
+app.get("/", fn(req) {
+    return web.html(page(store.all()))
+})
+app.post("/memos", fn(req) {
+    let text = get(req.form, "text", "")
+    if text != "" { store.add(text) }
+    return web.redirect("/", 302)
+})
+app.post("/memos/:id/delete", fn(req) {
+    store.remove(req.params["id"])
+    return web.redirect("/", 302)
+})
+
+// JSON API
+app.get("/api/memos", fn(req) {
+    return web.json(store.all())
+})
+app.get("/api/memos/:id", fn(req) {
+    let m = store.get(req.params["id"])
+    if m == nil { return web.not_found("memo not found") }
+    return web.json(m)
+})
+app.post("/api/memos", fn(req) {
+    if req.json == nil { return web.status(400, "JSON body required") }
+    let m = store.add(get(req.json, "text", ""))
+    let resp = web.json(m)
+    resp.status = 201
+    return resp
+})
+app.delete("/api/memos/:id", fn(req) {
+    let ok = store.remove(req.params["id"])
+    if ok == false { return web.not_found("memo not found") }
+    return web.json({"deleted": req.params["id"]})
+})
+
+web.serve(app, "127.0.0.1:8080")
