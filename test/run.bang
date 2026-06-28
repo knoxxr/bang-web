@@ -142,6 +142,25 @@ assert(web.byte_len("a가") == 4, "혼합 = 1+3")
 let kr = web.render(web.text("가나"))           // 6바이트
 assert(contains(kr, "Content-Length: 6"), "멀티바이트 본문 Content-Length(바이트)")
 
+// ── HTML 빌더 + 이스케이프 ──
+assert(web.escape("<a>&\"'") == "&lt;a&gt;&amp;&quot;&#39;", "escape 특수문자")
+assert(web.escape("plain") == "plain", "escape 평문 그대로")
+assert(web.el("p", nil, [web.txt("hi")]) == "<p>hi</p>", "el 기본")
+assert(web.el("div", {"class": "c"}, [web.raw("<b>x</b>")]) == "<div class=\"c\"><b>x</b></div>", "el 속성+raw 자식")
+assert(web.void_el("input", {"name": "q"}) == "<input name=\"q\">", "void_el (닫는 태그 없음)")
+assert(web.button("삭제") == "<button>삭제</button>", "button 헬퍼")
+assert(web.label("이름") == "<label>이름</label>", "label 헬퍼")
+assert(web.link("/x", "go") == "<a href=\"/x\">go</a>", "link 헬퍼")
+// XSS 방지: 사용자 입력이 txt 로 이스케이프됨
+assert(web.el("li", nil, [web.txt("<script>")]) == "<li>&lt;script&gt;</li>", "txt 가 XSS 차단")
+// 속성값도 이스케이프
+assert(web.el("a", {"href": "\"></a>"}, nil) == "<a href=\"&quot;&gt;&lt;/a&gt;\"></a>", "속성값 이스케이프")
+// 문서 골격
+let d = web.doc("제목", "<h1>본문</h1>")
+assert(contains(d, "<!doctype html>"), "doc DOCTYPE")
+assert(contains(d, "<title>제목</title>"), "doc title 이스케이프")
+assert(contains(d, "<h1>본문</h1>"), "doc body raw")
+
 let nf = web.render(web.status(404, "nope"))
 assert(contains(nf, "404 Not Found"), "404 상태")
 
