@@ -92,6 +92,32 @@ curl http://127.0.0.1:8080/users/42      # {"id":"42"}
 | `logger()` | 요청 1줄 로깅 `"GET /path -> 200"` |
 | `cors(origin)` | `Access-Control-Allow-Origin` 헤더 추가 |
 
+### HTML 빌더
+
+문자열 연결 대신 안전하게 HTML 을 구성한다. **사용자 입력은 기본 이스케이프**(`txt`·속성값),
+신뢰된 조각만 `raw` 로 통과시켜 XSS 를 막는다.
+
+| 함수 | 설명 |
+|---|---|
+| `escape(s)` | HTML 특수문자 이스케이프 (`& < > " '`) |
+| `el(tag, attrs, children)` | 일반 요소. `attrs` 는 맵(또는 `nil`), `children` 은 HTML 문자열 배열 |
+| `void_el(tag, attrs)` | 닫는 태그 없는 요소 (`input`/`img`/`br`) |
+| `txt(s)` | 이스케이프된 텍스트 노드 (children 에 넣어 안전하게 본문 삽입) |
+| `raw(s)` | 신뢰된 raw HTML 통과 (사용자 입력엔 쓰지 말 것) |
+| `button(s)` / `label(s)` | 버튼 / 라벨 (텍스트 자동 이스케이프) |
+| `input(attrs)` | `<input>` (void) |
+| `link(href, s)` | `<a href>s</a>` |
+| `doc(title, body)` | 전체 HTML 문서 골격 (title 이스케이프, body 는 raw) |
+
+```
+// <ul><li>#1 &lt;script&gt;</li></ul>  ← 사용자 입력이 자동 이스케이프됨
+app.get("/", fn(req) {
+    return web.html(web.doc("memos", web.el("ul", nil, [
+        web.el("li", nil, [web.txt("#1 <script>")])
+    ])))
+})
+```
+
 ### 요청 객체 (`req`)
 
 ```

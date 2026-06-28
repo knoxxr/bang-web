@@ -97,4 +97,10 @@
 
 - ✅ **v0.2**: Phase 1–4 (헤더·바디·파라미터·미들웨어·응답빌더) — 머지 완료
 - ✅ **v0.3**: Phase 5 (keep-alive) + Phase 6 (문서·태깅)
+- ✅ **v0.4**: HTML 빌더/이스케이프(`escape`/`el`/`txt`/`raw`/`button`/`label`/`input`/`link`/`doc`) + UTF-8 `Content-Length` 픽스(`byte_len`) + memos 예제
 - **이후**: 정적 파일 서빙, 코어 논블로킹 I/O 도입 시 C10K
+
+### v0.4 메모
+
+- **HTML 빌더**: 서버 렌더링 시 사용자 입력 자동 이스케이프(XSS 차단). 위젯이 아니라 안전한 HTML 구성 헬퍼.
+- **byte_len 픽스**: bang `len()`은 문자 수라, 멀티바이트 본문에서 `Content-Length`(바이트)가 잘못 잡혀 응답 잘림·요청 바디 무한대기가 났다. `render`와 `handle_conn` 바디 루프를 바이트 기준으로 수정.
