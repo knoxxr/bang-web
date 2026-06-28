@@ -13,6 +13,56 @@ let r2 = web.parse_request("POST /api/users HTTP/1.1\r\n\r\n")
 assert(r2.method == "POST", "POST method")
 assert(r2.path == "/api/users", "path no query")
 
+// 헤더 파싱 (소문자 키)
+let rh = web.parse_request("GET / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\r\n")
+assert(rh.headers["host"] == "localhost", "host 헤더")
+assert(rh.headers["content-type"] == "application/json", "content-type 헤더 (소문자 키)")
+
+// 바디 파싱 + Content-Length (버그 회귀: 헤더와 같은 청크에 실려온 바디 보존)
+let rb = web.parse_request("POST /api/users HTTP/1.1\r\nContent-Length: 13\r\n\r\n{\"name\":\"x\"}!")
+assert(rb.body == "{\"name\":\"x\"}!", "바디 보존")
+assert(web.content_length(rb) == 13, "content_length 파싱")
+assert(web.content_length(r2) == 0, "Content-Length 없으면 0")
+
+// url_decode (퍼센트 디코딩 + '+' → 공백)
+assert(web.url_decode("hello+world") == "hello world", "'+' → 공백")
+assert(web.url_decode("a%20b") == "a b", "%20 → 공백")
+assert(web.url_decode("%2B%21") == "+!", "%2B %21 디코드")
+assert(web.url_decode("plain") == "plain", "디코드 없음 그대로")
+
+// parse_query (쿼리스트링 → 맵)
+let q = web.parse_query("a=1&b=hello+world&c=%2Bx")
+assert(q["a"] == "1", "query a")
+assert(q["b"] == "hello world", "query b 디코드")
+assert(q["c"] == "+x", "query c 디코드")
+let q0 = web.parse_query("")
+assert(len(q0) == 0, "빈 쿼리 → 빈 맵")
+let qf = web.parse_query("flag&x=1")
+assert(qf["flag"] == "", "값 없는 키 → 빈 문자열")
+
+// req.query_params / req.json / req.form / req.header
+let rq = web.parse_request("GET /search?q=bang+web&n=3 HTTP/1.1\r\n\r\n")
+assert(rq.query_params["q"] == "bang web", "req.query_params 디코드")
+assert(rq.query_params["n"] == "3", "req.query_params n")
+
+// req.json — application/json 바디를 eager 파싱한 데이터 필드
+let rj = web.parse_request("POST /api HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"name\":\"bang\"}")
+assert(rj.json.name == "bang", "req.json 파싱")
+assert(rj.headers["content-type"] == "application/json", "헤더 소문자 키")
+
+// JSON 이 아닌 바디는 req.json == nil
+let rjn = web.parse_request("POST /api HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi")
+assert(rjn.json == nil, "JSON 아니면 req.json nil")
+
+// 깨진 JSON 도 nil (예외 삼킴)
+let rjb = web.parse_request("POST /api HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\n{ x")
+assert(rjb.json == nil, "깨진 JSON → nil")
+
+// req.form — urlencoded 바디를 eager 파싱한 데이터 필드
+let rfm = web.parse_request("POST /login HTTP/1.1\r\nContent-Length: 25\r\n\r\nuser=admin&pw=p%40ss+word")
+assert(rfm.form["user"] == "admin", "req.form user")
+assert(rfm.form["pw"] == "p@ss word", "req.form 디코드")
+
 // 라우팅
 let app = web.new_app()
 app.get("/", fn(req) { return web.text("home") })
@@ -21,6 +71,59 @@ assert(app.lookup("GET", "/") != nil, "GET / 등록됨")
 assert(app.lookup("POST", "/users") != nil, "POST /users 등록됨")
 assert(app.lookup("GET", "/users") == nil, "메서드 불일치는 미등록")
 assert(app.lookup("GET", "/missing") == nil, "없는 경로")
+
+// ── Phase 2: 세그먼트 분해 / 매칭 (순수 로직) ──
+assert(len(web.route_segments("/")) == 0, "루트 → 빈 세그먼트")
+let sg = web.route_segments("/users/:id")
+assert(len(sg) == 2, "세그먼트 2개")
+assert(sg[0] == "users", "세그먼트[0]")
+assert(sg[1] == ":id", "세그먼트[1]")
+
+// 정적 매칭
+assert(web.match_segments(web.route_segments("/a/b"), web.route_segments("/a/b")) != nil, "정적 일치")
+assert(web.match_segments(web.route_segments("/a/b"), web.route_segments("/a/c")) == nil, "정적 불일치")
+assert(web.match_segments(web.route_segments("/a"), web.route_segments("/a/b")) == nil, "경로가 더 김")
+assert(web.match_segments(web.route_segments("/a/b"), web.route_segments("/a")) == nil, "패턴이 더 김")
+
+// 파라미터 캡처
+let mp = web.match_segments(web.route_segments("/users/:id"), web.route_segments("/users/42"))
+assert(mp != nil, "파라미터 매칭")
+assert(mp["id"] == "42", "파라미터 캡처")
+let mp2 = web.match_segments(web.route_segments("/u/:a/p/:b"), web.route_segments("/u/1/p/2"))
+assert(mp2["a"] == "1", "다중 파라미터 a")
+assert(mp2["b"] == "2", "다중 파라미터 b")
+
+// 와일드카드 (남은 경로 전체)
+let mw = web.match_segments(web.route_segments("/static/*path"), web.route_segments("/static/css/app.css"))
+assert(mw["path"] == "css/app.css", "와일드카드 캡처")
+
+// 파라미터 라우트 + route() 결과
+let app2 = web.new_app()
+app2.get("/users/:id", fn(req) { return web.text("u") })
+app2.get("/static/*path", fn(req) { return web.text("s") })
+let rt1 = app2.route("GET", "/users/7")
+assert(rt1.matched == true, "param 라우트 매칭됨")
+assert(rt1.params["id"] == "7", "route params 캡처")
+let rt2 = app2.route("GET", "/static/js/x.js")
+assert(rt2.params["path"] == "js/x.js", "route wildcard 캡처")
+let rt3 = app2.route("GET", "/nope")
+assert(rt3.matched == false, "미등록 → 매칭 안 됨")
+assert(rt3.allow == "", "미등록 → allow 비어있음(404)")
+
+// 405: 경로는 있으나 메서드 불일치 → allow 설정
+let app3 = web.new_app()
+app3.post("/items", fn(req) { return web.text("p") })
+app3.put("/items", fn(req) { return web.text("u") })
+let rt4 = app3.route("GET", "/items")
+assert(rt4.matched == false, "GET /items 매칭 안 됨")
+assert(contains(rt4.allow, "POST"), "allow 에 POST")
+assert(contains(rt4.allow, "PUT"), "allow 에 PUT")
+
+// 405 응답 렌더링 + Allow 헤더 (with_header)
+let resp405 = web.with_header(web.status(405, "no"), "Allow", "POST, PUT")
+let out405 = web.render(resp405)
+assert(contains(out405, "405 Method Not Allowed"), "405 상태줄")
+assert(contains(out405, "Allow: POST, PUT"), "Allow 헤더 출력")
 
 // 응답 렌더링
 let out = web.render(web.text("hi"))
@@ -34,5 +137,76 @@ assert(contains(j, "{\"a\":1}"), "json 본문")
 
 let nf = web.render(web.status(404, "nope"))
 assert(contains(nf, "404 Not Found"), "404 상태")
+
+// ── Phase 4: 응답 빌더 확장 ──
+// html
+let hp = web.html("<h1>hi</h1>")
+assert(hp.content_type == "text/html; charset=utf-8", "html content-type")
+assert(contains(web.render(hp), "<h1>hi</h1>"), "html 본문")
+
+// redirect
+let rd = web.redirect("/login", 302)
+assert(rd.status == 302, "redirect 상태")
+let rdo = web.render(rd)
+assert(contains(rdo, "302 Found"), "302 상태줄")
+assert(contains(rdo, "Location: /login"), "Location 헤더")
+
+// not_found
+assert(web.not_found("none").status == 404, "not_found 404")
+
+// set_cookie (단일)
+let ck1 = web.set_cookie(web.text("ok"), "sid", "abc", "Path=/; HttpOnly")
+let ck1o = web.render(ck1)
+assert(contains(ck1o, "Set-Cookie: sid=abc; Path=/; HttpOnly"), "단일 쿠키 + 속성")
+
+// set_cookie (속성 없음)
+let ck2 = web.set_cookie(web.text("ok"), "k", "v", "")
+assert(contains(web.render(ck2), "Set-Cookie: k=v\r\n"), "속성 없는 쿠키")
+
+// set_cookie (다중 누적 → 여러 Set-Cookie 줄)
+let ck3 = web.set_cookie(web.set_cookie(web.text("ok"), "a", "1", ""), "b", "2", "")
+let ck3o = web.render(ck3)
+assert(contains(ck3o, "Set-Cookie: a=1"), "다중 쿠키 a")
+assert(contains(ck3o, "Set-Cookie: b=2"), "다중 쿠키 b")
+
+// ── Phase 3: 미들웨어 체인 (run_chain) ──
+// 최종 dispatch: 본문에 "H" 를 담은 응답
+let disp = fn(req) { return web.text("H") }
+
+// 미들웨어 없음 → dispatch 그대로
+let c0 = web.run_chain([], 0, "req", disp)
+assert(c0.body == "H", "미들웨어 0개 → dispatch")
+
+// 양파 순서: 등록 순서대로 바깥→안, 응답 후처리는 안→바깥
+let mws = []
+mws = push(mws, fn(req, next) {
+    let r = next()
+    r.body = "A(" + r.body + ")"
+    return r
+})
+mws = push(mws, fn(req, next) {
+    let r = next()
+    r.body = "B(" + r.body + ")"
+    return r
+})
+let c1 = web.run_chain(mws, 0, "req", disp)
+assert(c1.body == "A(B(H))", "양파 중첩 순서")
+
+// 미들웨어가 next 를 호출하지 않고 단락(short-circuit)
+let mws2 = []
+mws2 = push(mws2, fn(req, next) { return web.status(401, "denied") })
+mws2 = push(mws2, fn(req, next) { return next() })   // 도달하면 안 됨
+let c2 = web.run_chain(mws2, 0, "req", disp)
+assert(c2.status == 401, "단락 → 핸들러 미도달")
+
+// app.use 등록 + 누적
+let app4 = web.new_app()
+app4.use(web.cors("*"))
+assert(len(app4.middlewares()) == 1, "use 로 미들웨어 누적")
+
+// cors 미들웨어: 응답에 Allow-Origin 헤더
+let corsmw = web.cors("*")
+let cresp = corsmw("req", fn() { return web.text("ok") })
+assert(cresp.headers["Access-Control-Allow-Origin"] == "*", "cors 헤더 주입")
 
 print("bang-web: 모든 테스트 통과")
